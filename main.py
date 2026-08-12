@@ -121,7 +121,11 @@ class SerialReader:
                 raise SerialReaderError("Waiting for USB permission to be granted.")
 
             self._connection = serial4a.get_serial_port(
-                usb_device.getDeviceName(), SERIAL_BAUDRATE, 8, 1, 0
+                usb_device.getDeviceName(),
+                SERIAL_BAUDRATE,
+                8,      # data bits
+                "N",    # parity - must be 'N'/'E'/'O'/'M'/'S' (a string), not an int
+                1,      # stop bits
             )
             self._notify_status("USB CONNECTED")
         except SerialReaderError:
@@ -289,3 +293,4 @@ if __name__ == "__main__":
     except Exception:
         log_exception("top-level app.run()")
         raise
+            
