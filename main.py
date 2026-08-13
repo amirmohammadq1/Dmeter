@@ -128,6 +128,33 @@ class SerialReader:
                 "N",    # parity - must be 'N'/'E'/'O'/'M'/'S' (a string), not an int
                 1,      # stop bits
             )
+
+            # Genuine Arduino boards (ATmega16U2 USB-to-serial, as on the
+            # UNO R3) use a real USB CDC-ACM virtual serial port. Many
+            # CDC-ACM drivers - on desktop and here - simply do not start
+            # delivering data to the host until DTR (and usually RTS) is
+            # asserted; without this, the connection can report success
+            # and pass permission, yet never actually produce a byte, even
+            # though the exact same board shows data fine in the Arduino
+            # IDE's Serial Monitor (which always asserts DTR itself). This
+            # class is designed to be pyserial-interface-compatible, so
+            # try the same properties pyserial exposes.
+            try:
+                self._connection.dtr = True
+            except Exception:
+                pass
+            try:
+                self._connection.rts = True
+            except Exception:
+                pass
+            # a short, explicit timeout instead of whatever the library's
+            # own default is (a known source of very long/unpredictable
+            # blocking in this library - see jacklinquan/usbserial4a#2)
+            try:
+                self._connection.timeout = 0.1
+            except Exception:
+                pass
+
             self._notify_status("USB CONNECTED")
         except SerialReaderError:
             raise
@@ -172,6 +199,15 @@ class SerialReader:
             if self._connection is None:
                 return b""
             try:
+                # prefer the pyserial-style in_waiting pattern (matches the
+                # desktop path below) - a blind fixed-size read(4096) can
+                # end up waiting for that many bytes to accumulate instead
+                # of returning immediately with whatever's already there
+                n = getattr(self._connection, "in_waiting", None)
+                if callable(n):
+                    n = n()
+                if n is not None:
+                    return self._connection.read(n) if n else b""
                 return self._connection.read(4096) or b""
             except Exception:
                 if not self._read_error_logged:
@@ -354,3 +390,4 @@ if __name__ == "__main__":
     except Exception:
         log_exception("top-level app.run()")
         raise
+    
