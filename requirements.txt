@@ -1,5 +1,0 @@
-# App dependencies (also repeated in buildozer.spec, which is what buildozer actually reads)
-kivy==2.3.1
-pyserial
-usb4a
-usbserial4a
