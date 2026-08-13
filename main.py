@@ -1,19 +1,19 @@
 # -*- coding: utf-8 -*-
-
 """
 Dmeter - main.py
+A single-purpose digital meter: connects to an Arduino over USB/OTG,
+reads one integer (millimeters) per line, and shows it on screen as a
+big white number in centimeters with one decimal place (e.g. "180.0")
+on a plain black background.
 
-Android app:
-Arduino -> USB/OTG -> Android -> big digital meter
+This app does zero calculation of its own beyond the mm -> cm display
+conversion (divide by 10, one decimal place) - the 200cm-baseline math
+lives entirely on the Arduino (see firmware/Dmeter.ino). The phone is
+purely a display.
 
-Arduino sends one integer per line in millimeters.
-Example:
-1800
-1801
-1799
-
-The phone converts:
-1800 mm -> 180.0 cm
+Kept as a single file (no separate .kv) on purpose: this app is simple
+enough that one file is easier to maintain and impossible to break by a
+copy/paste mismatch between files.
 """
 
 import os
@@ -27,22 +27,14 @@ from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.label import Label
 from kivy.utils import platform
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
 SERIAL_BAUDRATE = 9600
-
 SERIAL_RECONNECT_DELAY = 2.0
-
 UI_UPDATE_INTERVAL = 1 / 30.0
 
 
-# ============================================================
-# LOGGING
-# ============================================================
-
+# ---------------------------------------------------------------------
+# Crash logging
+# ---------------------------------------------------------------------
 def _log_dir():
     try:
         if platform == "android":
@@ -69,12 +61,10 @@ def log_event(message):
             "a",
             encoding="utf-8"
         ) as f:
-
             f.write(
                 f"[{datetime.datetime.now().isoformat(timespec='seconds')}] "
                 f"{message}\n"
             )
-
     except Exception:
         pass
 
@@ -86,38 +76,24 @@ def log_exception(context):
             "a",
             encoding="utf-8"
         ) as f:
-
             f.write(
                 f"[{datetime.datetime.now().isoformat(timespec='seconds')}] "
                 f"EXCEPTION in {context}:\n"
             )
-
             f.write(
                 traceback.format_exc()
             )
-
             f.write("\n")
-
     except Exception:
         pass
 
 
-log_event(
-    "=== Dmeter starting ==="
-)
+log_event("=== Dmeter starting ===")
 
-
-# ============================================================
-# SERIAL ERROR
-# ============================================================
 
 class SerialReaderError(Exception):
     pass
 
-
-# ============================================================
-# SERIAL READER
-# ============================================================
 
 class SerialReader:
 
@@ -126,7 +102,6 @@ class SerialReader:
         on_value=None,
         on_status=None
     ):
-
         self.on_value = on_value
         self.on_status = on_status
 
@@ -138,36 +113,22 @@ class SerialReader:
         self._serial_port = None
 
         self._rx_buffer = b""
-
         self._read_error_logged = False
 
-    # --------------------------------------------------------
-    # OPEN
-    # --------------------------------------------------------
-
     def open(self):
-
         if self._is_android:
             self._open_android()
-
         else:
             self._open_desktop()
 
-    # --------------------------------------------------------
-    # ANDROID USB
-    # --------------------------------------------------------
-
-    def _open_android():
+    def _open_android(self):
 
         try:
-
             from usb4a import usb
             from usbserial4a import serial4a
-
         except ImportError as exc:
-
             raise SerialReaderError(
-                "USB SERIAL LIBRARY ERROR"
+                "usb4a / usbserial4a not installed."
             ) from exc
 
         try:
@@ -177,97 +138,82 @@ class SerialReader:
             )
 
             if not device_list:
-
                 self._notify_status(
                     "NO USB DEVICE"
                 )
-
                 raise SerialReaderError(
-                    "NO USB DEVICE"
+                    "No USB device connected."
                 )
 
-            selected_device = None
+            # ---------------------------------------------------------
+            # Prefer Arduino / common USB-serial devices
+            # ---------------------------------------------------------
 
-            # Official Arduino USB VIDs
-            arduino_vids = {
-                0x2341,
-                0x2A03
-            }
+            preferred = []
+            fallback = []
 
-            # Common USB-Serial clone VIDs
-            serial_vids = {
-                0x1A86,   # CH340 / CH341
-                0x10C4,   # CP210x
-                0x0403,   # FTDI
-                0x067B    # PL2303
-            }
-
-            # ------------------------------------------------
-            # Prefer Arduino
-            # ------------------------------------------------
-
-            for device in device_list:
+            for dev in device_list:
 
                 try:
 
-                    vid = (
-                        device.getVendorId()
+                    vid = int(
+                        dev.getVendorId()
                     )
 
-                    if vid in arduino_vids:
+                    pid = int(
+                        dev.getProductId()
+                    )
 
-                        selected_device = device
+                    known = (
+                        vid == 0x2341 or
+                        vid == 0x2A03 or
+                        vid == 0x1A86 or
+                        vid == 0x0403 or
+                        vid == 0x10C4 or
+                        vid == 0x067B
+                    )
 
-                        break
+                    if known:
+                        preferred.append(dev)
+                    else:
+                        fallback.append(dev)
 
                 except Exception:
+                    fallback.append(dev)
 
-                    pass
+            candidates = (
+                preferred
+                if preferred
+                else fallback
+            )
 
-            # ------------------------------------------------
-            # Then common USB serial chips
-            # ------------------------------------------------
-
-            if selected_device is None:
-
-                for device in device_list:
-
-                    try:
-
-                        vid = (
-                            device.getVendorId()
-                        )
-
-                        if vid in serial_vids:
-
-                            selected_device = device
-
-                            break
-
-                    except Exception:
-
-                        pass
-
-            # ------------------------------------------------
-            # Fallback
-            # ------------------------------------------------
-
-            if selected_device is None:
-
-                selected_device = (
-                    device_list[0]
+            if not candidates:
+                raise SerialReaderError(
+                    "No USB serial device found."
                 )
 
-            # ------------------------------------------------
+            usb_device = candidates[0]
+
+            try:
+                log_event(
+                    "USB candidate selected: "
+                    f"VID=0x{int(usb_device.getVendorId()):04X} "
+                    f"PID=0x{int(usb_device.getProductId()):04X} "
+                    f"NAME={usb_device.getDeviceName()}"
+                )
+            except Exception:
+                pass
+
+            # ---------------------------------------------------------
             # USB permission
-            # ------------------------------------------------
+            # ---------------------------------------------------------
 
             if not usb.has_usb_permission(
-                selected_device
+                usb_device
             ):
 
                 usb.request_usb_permission(
-                    selected_device
+                    usb_device
                 )
 
                 self._notify_status(
@@ -275,63 +221,45 @@ class SerialReader:
                 )
 
                 raise SerialReaderError(
-                    "WAITING FOR USB PERMISSION"
+                    "Waiting for USB permission to be granted."
                 )
 
-            # ------------------------------------------------
-            # OPEN SERIAL
-            # ------------------------------------------------
-
-            device_name = (
-                selected_device.getDeviceName()
-            )
+            # ---------------------------------------------------------
+            # Open serial port
+            # ---------------------------------------------------------
 
             self._connection = (
                 serial4a.get_serial_port(
-                    device_name,
+                    usb_device.getDeviceName(),
                     SERIAL_BAUDRATE,
                     8,
                     "N",
-                    1
+                    1,
                 )
             )
 
             if self._connection is None:
-
                 raise SerialReaderError(
-                    "SERIAL PORT ERROR"
+                    "USB serial port could not be opened."
                 )
 
-            # ------------------------------------------------
+            # ---------------------------------------------------------
             # DTR / RTS
-            # ------------------------------------------------
+            # ---------------------------------------------------------
 
             try:
-
                 self._connection.dtr = True
-
             except Exception:
-
                 pass
 
             try:
-
                 self._connection.rts = True
-
             except Exception:
-
                 pass
 
-            # ------------------------------------------------
-            # Serial timeout
-            # ------------------------------------------------
-
             try:
-
                 self._connection.timeout = 0.1
-
             except Exception:
-
                 pass
 
             self._notify_status(
@@ -339,7 +267,6 @@ class SerialReader:
             )
 
         except SerialReaderError:
-
             raise
 
         except Exception as exc:
@@ -349,46 +276,38 @@ class SerialReader:
             )
 
             raise SerialReaderError(
-                f"USB CONNECTION FAILED: {exc}"
+                f"USB connection failed: {exc}"
             ) from exc
-
-    # --------------------------------------------------------
-    # DESKTOP SERIAL
-    # --------------------------------------------------------
 
     def _open_desktop(self):
 
         try:
-
-            import serial
-
+            import serial as pyserial
         except ImportError as exc:
 
             raise SerialReaderError(
-                "PYTHON SERIAL NOT INSTALLED"
+                "pyserial not installed."
             ) from exc
 
         try:
 
-            self._serial_port = serial.Serial(
-                "/dev/ttyUSB0",
-                SERIAL_BAUDRATE,
-                timeout=0.2
+            self._serial_port = (
+                pyserial.Serial(
+                    "/dev/ttyUSB0",
+                    SERIAL_BAUDRATE,
+                    timeout=0.2
+                )
             )
 
             self._notify_status(
-                "SERIAL CONNECTED"
+                "SERIAL CONNECTED (desktop)"
             )
 
         except Exception as exc:
 
             raise SerialReaderError(
-                f"DESKTOP SERIAL ERROR: {exc}"
+                f"Desktop serial connection failed: {exc}"
             ) from exc
-
-    # --------------------------------------------------------
-    # POLL
-    # --------------------------------------------------------
 
     def poll(self):
 
@@ -397,7 +316,6 @@ class SerialReader:
         )
 
         if not raw_bytes:
-
             return
 
         self._rx_buffer += raw_bytes
@@ -416,85 +334,64 @@ class SerialReader:
                 line = (
                     line_bytes
                     .decode(
-                        "ascii",
+                        "utf-8",
                         errors="ignore"
                     )
                     .strip()
                 )
 
             except Exception:
-
                 continue
 
             if not line:
-
                 continue
-
-            # --------------------------------------------
-            # Arduino sends INTEGER millimeters
-            # --------------------------------------------
 
             try:
 
                 value_mm = int(line)
 
             except ValueError:
-
-                continue
-
-            if value_mm < 0:
-
                 continue
 
             if self.on_value is not None:
-
                 self.on_value(
                     value_mm
                 )
 
-    # --------------------------------------------------------
-    # READ BYTES
-    # --------------------------------------------------------
-
     def _read_available_bytes(self):
-
-        # ====================================================
-        # ANDROID
-        # ====================================================
 
         if self._is_android:
 
             if self._connection is None:
-
                 return b""
 
             try:
 
-                waiting = getattr(
+                n = getattr(
                     self._connection,
                     "in_waiting",
                     None
                 )
 
-                if callable(waiting):
+                if callable(n):
+                    n = n()
 
-                    waiting = waiting()
-
-                if waiting is not None:
-
-                    if waiting <= 0:
-
-                        return b""
+                if isinstance(
+                    n,
+                    int
+                ) and n > 0:
 
                     return (
                         self._connection
-                        .read(waiting)
+                        .read(n)
                         or b""
                     )
 
+                # Fallback for usbserial4a versions
+                # that don't expose in_waiting.
                 return (
                     self._connection
-                    .read(256)
+                    .read(64)
                     or b""
                 )
 
@@ -505,51 +402,41 @@ class SerialReader:
                     self._read_error_logged = True
 
                     log_exception(
-                        "ANDROID SERIAL READ"
+                        "SerialReader._read_available_bytes (android)"
                     )
 
                 return b""
 
-        # ====================================================
-        # DESKTOP
-        # ====================================================
+        else:
 
-        if self._serial_port is None:
-
-            return b""
-
-        try:
-
-            waiting = (
-                self._serial_port.in_waiting
-            )
-
-            if waiting <= 0:
-
+            if self._serial_port is None:
                 return b""
 
-            return (
-                self._serial_port.read(
-                    waiting
-                )
-                or b""
-            )
+            try:
 
-        except Exception:
-
-            if not self._read_error_logged:
-
-                self._read_error_logged = True
-
-                log_exception(
-                    "DESKTOP SERIAL READ"
+                n = (
+                    self._serial_port
+                    .in_waiting
                 )
 
-            return b""
+                return (
+                    self._serial_port
+                    .read(n)
+                    if n
+                    else b""
+                )
 
-    # --------------------------------------------------------
-    # STATUS
-    # --------------------------------------------------------
+            except Exception:
+
+                if not self._read_error_logged:
+
+                    self._read_error_logged = True
+
+                    log_exception(
+                        "SerialReader._read_available_bytes (desktop)"
+                    )
+
+                return b""
 
     def _notify_status(
         self,
@@ -557,25 +444,15 @@ class SerialReader:
     ):
 
         if self.on_status is not None:
-
-            self.on_status(
-                message
-            )
-
-    # --------------------------------------------------------
-    # CLOSE
-    # --------------------------------------------------------
+            self.on_status(message)
 
     def close(self):
 
         if self._connection is not None:
 
             try:
-
                 self._connection.close()
-
             except Exception:
-
                 pass
 
             self._connection = None
@@ -583,27 +460,16 @@ class SerialReader:
         if self._serial_port is not None:
 
             try:
-
                 self._serial_port.close()
-
             except Exception:
-
                 pass
 
             self._serial_port = None
 
 
-# ============================================================
-# DMETER APP
-# ============================================================
-
 class DmeterApp(App):
 
     title = "Dmeter"
-
-    # --------------------------------------------------------
-    # BUILD
-    # --------------------------------------------------------
 
     def build(self):
 
@@ -622,57 +488,41 @@ class DmeterApp(App):
             FloatLayout()
         )
 
-        # ====================================================
-        # AMIRMEDK WATERMARK
-        # ====================================================
+        # =========================================================
+        # AmirMEDK watermark
+        # =========================================================
 
         self.watermark_label = Label(
-
-            text=(
-                "[b]"
-                "\u25B6  AmirMEDK"
-                "[/b]"
-            ),
-
+            text="[b]\u25B6  AmirMEDK[/b]",
             markup=True,
-
             color=(
                 1,
                 1,
                 1,
                 0.14
             ),
-
             font_size="60sp",
-
             bold=True,
-
             size_hint=(
                 0.6,
                 None
             ),
-
             height="110dp",
-
             pos_hint={
                 "center_x": 0.5,
                 "top": 0.98
             },
-
             halign="center",
-
-            valign="middle"
+            valign="middle",
         )
 
         self.watermark_label.bind(
-
-            size=lambda instance, size:
+            size=lambda inst, sz:
                 setattr(
-                    instance,
+                    inst,
                     "text_size",
-                    size
+                    sz
                 )
-
         )
 
         self.root_layout.add_widget(
@@ -686,111 +536,81 @@ class DmeterApp(App):
                 self._resize_watermark_font()
         )
 
-        # ====================================================
-        # BIG NUMBER
-        # ====================================================
+        # =========================================================
+        # BIG VALUE
+        # =========================================================
 
         self.value_label = Label(
-
             text="--.-",
-
             color=(
                 1,
                 1,
                 1,
                 1
             ),
-
             font_size="180sp",
-
             bold=True,
-
             size_hint=(
                 1,
                 1
             ),
-
             pos_hint={
                 "center_x": 0.5,
                 "center_y": 0.55
             },
-
             halign="center",
-
-            valign="middle"
         )
 
         self.root_layout.add_widget(
             self.value_label
         )
 
-        # ====================================================
+        # =========================================================
         # STATUS
-        # ====================================================
+        # =========================================================
 
         self.status_label = Label(
-
             text="CONNECTING...",
-
             color=(
                 0.5,
                 0.5,
                 0.5,
                 1
             ),
-
             font_size="18sp",
-
             size_hint=(
                 1,
                 None
             ),
-
             height="30dp",
-
             pos_hint={
                 "center_x": 0.5,
                 "y": 0.03
-            }
+            },
         )
 
         self.root_layout.add_widget(
             self.status_label
         )
 
-        # ====================================================
+        # =========================================================
         # SERIAL READER
-        # ====================================================
+        # =========================================================
 
         self.reader = SerialReader(
-
             on_value=self._on_value,
-
             on_status=self._on_status
         )
 
         self._connected = False
 
-        # ====================================================
-        # ANDROID PERMISSIONS
-        # ====================================================
-
         if platform == "android":
-
             self._request_android_permissions()
-
-        # ====================================================
-        # START CONNECTION
-        # ====================================================
 
         Clock.schedule_once(
             self._try_connect,
             0.3
         )
-
-        # ====================================================
-        # POLLING
-        # ====================================================
 
         Clock.schedule_interval(
             self._poll_loop,
@@ -798,18 +618,12 @@ class DmeterApp(App):
         )
 
         log_event(
-            "build() finished"
+            "build() finished successfully"
         )
 
         return self.root_layout
 
-    # --------------------------------------------------------
-    # WATERMARK SIZE
-    # --------------------------------------------------------
-
-    def _resize_watermark_font(
-        self
-    ):
+    def _resize_watermark_font(self):
 
         try:
 
@@ -819,16 +633,9 @@ class DmeterApp(App):
             )
 
         except Exception:
-
             pass
 
-    # --------------------------------------------------------
-    # ANDROID PERMISSION
-    # --------------------------------------------------------
-
-    def _request_android_permissions(
-        self
-    ):
+    def _request_android_permissions(self):
 
         try:
 
@@ -840,11 +647,9 @@ class DmeterApp(App):
 
         except Exception:
 
-            pass
-
-    # --------------------------------------------------------
-    # CONNECT
-    # --------------------------------------------------------
+            log_exception(
+                "_request_android_permissions"
+            )
 
     def _try_connect(
         self,
@@ -883,11 +688,11 @@ class DmeterApp(App):
             self._connected = False
 
             log_exception(
-                "CONNECT"
+                "reader.open() - unexpected error"
             )
 
             self.status_label.text = (
-                "CONNECTION ERROR"
+                "SENSOR LINK ERROR"
             )
 
             Clock.schedule_once(
@@ -895,28 +700,16 @@ class DmeterApp(App):
                 SERIAL_RECONNECT_DELAY
             )
 
-    # --------------------------------------------------------
-    # STATUS CALLBACK
-    # --------------------------------------------------------
-
     def _on_status(
         self,
         message
     ):
-
         pass
-
-    # --------------------------------------------------------
-    # VALUE CALLBACK
-    # --------------------------------------------------------
 
     def _on_value(
         self,
         value_mm
     ):
-
-        # Arduino sends millimeters.
-        # Phone only converts mm -> cm.
 
         value_cm = (
             value_mm / 10.0
@@ -930,10 +723,6 @@ class DmeterApp(App):
             "LIVE"
         )
 
-    # --------------------------------------------------------
-    # POLL LOOP
-    # --------------------------------------------------------
-
     def _poll_loop(
         self,
         dt
@@ -942,13 +731,37 @@ class DmeterApp(App):
         try:
 
             if self._connected:
-
                 self.reader.poll()
 
         except Exception:
 
             log_exception(
-                "POLL LOOP"
+                "_poll_loop"
             )
 
-    # -------------------
+    def on_stop(self):
+
+        try:
+
+            self.reader.close()
+
+        except Exception:
+
+            log_exception(
+                "on_stop / reader.close()"
+            )
+
+
+if __name__ == "__main__":
+
+    try:
+
+        DmeterApp().run()
+
+    except Exception:
+
+        log_exception(
+            "top-level app.run()"
+        )
+
+        raise
